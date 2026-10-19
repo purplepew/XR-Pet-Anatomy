@@ -2,7 +2,7 @@ import React, { useEffect, useRef } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
-import { ScanLine } from 'lucide-react';
+import { ScanLine, Camera, RefreshCw, QrCode } from 'lucide-react';
 import {
   AnatomicalLayerId,
   FLASHCARD_MARKERS,
@@ -27,13 +27,17 @@ interface WebARViewportProps {
   selectedOrganId: string | null;
   markerTracked: boolean;
   cameraStreamActive: boolean;
+  mediaStream: MediaStream | null;
+  cameraFacingMode: 'environment' | 'user';
   cameraResetTrigger: number;
   onSelectOrgan: (organId: string | null) => void;
   onProjectedOrganMove: (pos: { x: number; y: number } | null) => void;
   onViewportResize: (size: { width: number; height: number }) => void;
   onOpticalMarkerDetected: (speciesId: PetSpeciesId, code: string) => void;
   onReacquireMarker: () => void;
-  onCameraError: (message: string) => void;
+  onStartCameraClick: () => void;
+  onFlipCameraClick: () => void;
+  onOpenFlashcardsClick: () => void;
 }
 
 // Pre-allocated module-scope math objects (Zero GC in render loop)
@@ -43,6 +47,7 @@ const _scratchTargetScale = new THREE.Vector3();
 const _raycaster = new THREE.Raycaster();
 _raycaster.layers.set(1); // Restrict raycasting exclusively to Internal Organs layer
 const _pointerNdc = new THREE.Vector2();
+const _defaultFog = new THREE.FogExp2(0x090d16, 0.045);
 
 export const WebARViewport: React.FC<WebARViewportProps> = ({
   speciesId,
@@ -52,13 +57,17 @@ export const WebARViewport: React.FC<WebARViewportProps> = ({
   selectedOrganId,
   markerTracked,
   cameraStreamActive,
+  mediaStream,
+  cameraFacingMode,
   cameraResetTrigger,
   onSelectOrgan,
   onProjectedOrganMove,
   onViewportResize,
   onOpticalMarkerDetected,
   onReacquireMarker,
-  onCameraError,
+  onStartCameraClick,
+  onFlipCameraClick,
+  onOpenFlashcardsClick,
 }) => {
   const canvasMountRef = useRef<HTMLDivElement | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -71,6 +80,7 @@ export const WebARViewport: React.FC<WebARViewportProps> = ({
   const selectedOrganRef = useRef<string | null>(selectedOrganId);
   const hoveredOrganRef = useRef<string | null>(null);
   const markerTrackedRef = useRef<boolean>(markerTracked);
+  const cameraStreamActiveRef = useRef<boolean>(cameraStreamActive);
 
   const onSelectOrganRef = useRef(onSelectOrgan);
   const onProjectedOrganMoveRef = useRef(onProjectedOrganMove);
@@ -83,6 +93,7 @@ export const WebARViewport: React.FC<WebARViewportProps> = ({
   xrayRef.current = xrayCutawayEnabled;
   selectedOrganRef.current = selectedOrganId;
   markerTrackedRef.current = markerTracked;
+  cameraStreamActiveRef.current = cameraStreamActive;
   onSelectOrganRef.current = onSelectOrgan;
   onProjectedOrganMoveRef.current = onProjectedOrganMove;
   onViewportResizeRef.current = onViewportResize;
@@ -102,118 +113,89 @@ export const WebARViewport: React.FC<WebARViewportProps> = ({
     }
   }, [cameraResetTrigger]);
 
-  // Hardware WebRTC Camera initialization (`getUserMedia`) + Optical Fiducial Scanner
+  // Attach user-gesture acquired MediaStream to the <video> element and run Optical Fiducial Scanner
   useEffect(() => {
-    let mediaStream: MediaStream | null = null;
+    const videoEl = videoRef.current;
+    if (!videoEl) return;
+
     let scanInterval: number | null = null;
 
-    const stopStream = () => {
-      if (scanInterval !== null) {
-        window.clearInterval(scanInterval);
-        scanInterval = null;
-      }
-      if (mediaStream) {
-        mediaStream.getTracks().forEach((t) => t.stop());
-        mediaStream = null;
-      }
-      if (videoRef.current) {
-        videoRef.current.srcObject = null;
-      }
-    };
-
-    if (!cameraStreamActive) {
-      stopStream();
+    if (!mediaStream || !cameraStreamActive) {
+      videoEl.srcObject = null;
       return;
     }
 
-    let cancelled = false;
-    const startCamera = async () => {
-      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        onCameraError(
-          'Browser camera API unavailable in this environment. Running Optical AR Simulation mode.'
-        );
-        return;
-      }
+    videoEl.setAttribute('playsinline', 'true');
+    videoEl.setAttribute('webkit-playsinline', 'true');
+    videoEl.muted = true;
+    videoEl.srcObject = mediaStream;
+
+    const playVideo = async () => {
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: {
-            facingMode: { ideal: 'environment' },
-            width: { ideal: 1280 },
-            height: { ideal: 720 },
-          },
-          audio: false,
-        });
-        if (cancelled) {
-          stream.getTracks().forEach((t) => t.stop());
-          return;
-        }
-        mediaStream = stream;
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-          await videoRef.current.play().catch(() => {});
-        }
-
-        // Optical 4x4 fiducial frame sampler
-        const sampleCanvas = document.createElement('canvas');
-        sampleCanvas.width = 64;
-        sampleCanvas.height = 64;
-        const sampleCtx = sampleCanvas.getContext('2d', { willReadFrequently: true });
-
-        scanInterval = window.setInterval(() => {
-          const video = videoRef.current;
-          if (!video || video.readyState < 2 || !sampleCtx) return;
-          const vw = video.videoWidth || 640;
-          const vh = video.videoHeight || 480;
-          const cropSize = Math.min(vw, vh) * 0.5;
-          sampleCtx.drawImage(
-            video,
-            (vw - cropSize) * 0.5,
-            (vh - cropSize) * 0.5,
-            cropSize,
-            cropSize,
-            0,
-            0,
-            64,
-            64
-          );
-          const imgData = sampleCtx.getImageData(0, 0, 64, 64).data;
-          const grid: number[][] = [
-            [0, 0, 0, 0],
-            [0, 0, 0, 0],
-            [0, 0, 0, 0],
-            [0, 0, 0, 0],
-          ];
-          for (let r = 0; r < 4; r++) {
-            for (let c = 0; c < 4; c++) {
-              const px = Math.floor(12 + c * 10 + 5);
-              const py = Math.floor(12 + r * 10 + 5);
-              const idx = (py * 64 + px) * 4;
-              const lum =
-                0.299 * imgData[idx] +
-                0.587 * imgData[idx + 1] +
-                0.114 * imgData[idx + 2];
-              grid[r][c] = lum < 115 ? 1 : 0;
-            }
-          }
-          const match = matchFiducialMatrix(grid);
-          if (match.detected && match.speciesId && match.markerCode) {
-            onOpticalMarkerDetectedRef.current(match.speciesId, match.markerCode);
-          }
-        }, 650);
+        await videoEl.play();
       } catch {
-        onCameraError(
-          'Physical camera access was declined or unavailable. Using Optical AR Tabletop Simulator.'
-        );
+        // Retry once metadata loads on mobile Safari/Chrome
       }
     };
 
-    startCamera();
+    videoEl.onloadedmetadata = () => {
+      playVideo();
+    };
+    playVideo();
+
+    // Optical 4x4 fiducial frame sampler
+    const sampleCanvas = document.createElement('canvas');
+    sampleCanvas.width = 64;
+    sampleCanvas.height = 64;
+    const sampleCtx = sampleCanvas.getContext('2d', { willReadFrequently: true });
+
+    scanInterval = window.setInterval(() => {
+      if (!videoEl || videoEl.readyState < 2 || !sampleCtx) return;
+      const vw = videoEl.videoWidth || 640;
+      const vh = videoEl.videoHeight || 480;
+      const cropSize = Math.min(vw, vh) * 0.5;
+      sampleCtx.drawImage(
+        videoEl,
+        (vw - cropSize) * 0.5,
+        (vh - cropSize) * 0.5,
+        cropSize,
+        cropSize,
+        0,
+        0,
+        64,
+        64
+      );
+      const imgData = sampleCtx.getImageData(0, 0, 64, 64).data;
+      const grid: number[][] = [
+        [0, 0, 0, 0],
+        [0, 0, 0, 0],
+        [0, 0, 0, 0],
+        [0, 0, 0, 0],
+      ];
+      for (let r = 0; r < 4; r++) {
+        for (let c = 0; c < 4; c++) {
+          const px = Math.floor(12 + c * 10 + 5);
+          const py = Math.floor(12 + r * 10 + 5);
+          const idx = (py * 64 + px) * 4;
+          const lum =
+            0.299 * imgData[idx] +
+            0.587 * imgData[idx + 1] +
+            0.114 * imgData[idx + 2];
+          grid[r][c] = lum < 115 ? 1 : 0;
+        }
+      }
+      const match = matchFiducialMatrix(grid);
+      if (match.detected && match.speciesId && match.markerCode) {
+        onOpticalMarkerDetectedRef.current(match.speciesId, match.markerCode);
+      }
+    }, 650);
 
     return () => {
-      cancelled = true;
-      stopStream();
+      if (scanInterval !== null) {
+        window.clearInterval(scanInterval);
+      }
     };
-  }, [cameraStreamActive, onCameraError]);
+  }, [mediaStream, cameraStreamActive]);
 
   // Main Three.js WebGLRenderer & Scene Lifecycle (Mounted Once)
   useEffect(() => {
@@ -228,7 +210,7 @@ export const WebARViewport: React.FC<WebARViewportProps> = ({
     onViewportResizeRef.current({ width, height });
 
     const scene = new THREE.Scene();
-    scene.fog = new THREE.FogExp2(0x090d16, 0.045);
+    scene.fog = _defaultFog;
 
     const camera = new THREE.PerspectiveCamera(44, width / height, 0.1, 100);
     camera.position.set(2.45, 2.15, 2.65);
@@ -425,6 +407,11 @@ export const WebARViewport: React.FC<WebARViewportProps> = ({
 
       controls.update();
 
+      // Toggle fog and synthetic floor grid based on whether live camera video is active
+      const isLiveCam = cameraStreamActiveRef.current;
+      scene.fog = isLiveCam ? null : _defaultFog;
+      arFloorGrid.visible = !isLiveCam;
+
       const activeSpecies = speciesIdRef.current;
       const isTracked = markerTrackedRef.current;
       const scenes = builtScenesRef.current;
@@ -572,35 +559,73 @@ export const WebARViewport: React.FC<WebARViewportProps> = ({
 
   return (
     <div className="relative h-full w-full overflow-hidden bg-slate-950 select-none">
-      {/* Live Mobile Camera Feed Video Element */}
+      {/* Live Mobile Camera Feed Video Element (z-0, full opacity when active) */}
       <video
         ref={videoRef}
         playsInline
         muted
         autoPlay
         aria-label="Device camera AR background feed"
-        className={`pointer-events-none absolute inset-0 h-full w-full object-cover transition-opacity duration-300 ${
-          cameraStreamActive ? 'opacity-65' : 'opacity-0'
-        }`}
+        className={`pointer-events-none absolute inset-0 z-0 h-full w-full object-cover transition-opacity duration-300 ${
+          cameraStreamActive ? 'opacity-100' : 'opacity-0'
+        } ${cameraFacingMode === 'user' ? '-scale-x-100' : ''}`}
       />
 
       {/* Simulated Optical AR Environment Backdrop when Hardware Camera is Off */}
       {!cameraStreamActive && (
         <div
           aria-hidden="true"
-          className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_50%_38%,#1e293b_0%,#090d16_72%)]"
+          className="pointer-events-none absolute inset-0 z-0 bg-[radial-gradient(circle_at_50%_38%,#1e293b_0%,#090d16_72%)]"
         />
       )}
+
+      {/* Top-Left Mobile Quick Bar: Camera Mode Status + Flip Camera + Flashcards Modal Trigger */}
+      <div className="pointer-events-auto absolute top-2.5 left-2.5 right-2.5 z-20 flex flex-wrap items-center justify-between gap-2 sm:top-4 sm:left-4 sm:right-4">
+        <div className="flex items-center gap-1.5">
+          {!cameraStreamActive ? (
+            <button
+              type="button"
+              onClick={onStartCameraClick}
+              className="flex min-h-[38px] items-center gap-2 rounded-xl border border-sky-400/50 bg-slate-950/90 px-3 py-1.5 text-xs font-semibold text-sky-300 shadow-lg transition-colors hover:border-sky-400 hover:text-white whitespace-nowrap shrink-0"
+            >
+              <Camera className="h-3.5 w-3.5 text-sky-400" />
+              <span>Enable Phone Camera AR</span>
+            </button>
+          ) : (
+            <div className="flex items-center gap-1.5">
+              <span className=" rounded-xl border border-emerald-500/40 bg-slate-950/90 px-2.5 py-1.5 font-mono-tabular text-[11px] font-semibold text-emerald-300 shadow-lg">
+                CAMERA ACTIVE ({cameraFacingMode === 'environment' ? 'REAR' : 'FRONT'})
+              </span>
+              <button
+                type="button"
+                onClick={onFlipCameraClick}
+                aria-label="Switch front and rear camera"
+                className="flex min-h-[38px] items-center gap-1.5 rounded-xl border border-slate-700 bg-slate-950/90 px-2.5 py-1.5 text-xs font-semibold text-slate-100 shadow-lg transition-colors hover:border-sky-400 whitespace-nowrap shrink-0"
+              >
+                <RefreshCw className="h-3.5 w-3.5 text-sky-400" />
+                <span>Flip Lens</span>
+              </button>
+            </div>
+          )}
+        </div>
+
+        <button
+          type="button"
+          onClick={onOpenFlashcardsClick}
+          className="flex min-h-[38px] items-center gap-1.5 rounded-xl border border-slate-700 bg-slate-950/90 px-3 py-1.5 text-xs font-semibold text-slate-100 shadow-lg transition-colors hover:border-sky-400 hover:text-white whitespace-nowrap shrink-0"
+        >
+          <QrCode className="h-3.5 w-3.5 text-sky-400" />
+          <span>AR Flashcards</span>
+        </button>
+      </div>
 
       {/* Corner Optical AR Camera Frame Reticles */}
       <div
         aria-hidden="true"
         className="pointer-events-none absolute inset-4 z-0 sm:inset-6"
       >
-        <div className="absolute top-0 left-0 h-6 w-6 border-t-2 border-l-2 border-sky-400/40" />
-        <div className="absolute top-0 right-0 h-6 w-6 border-t-2 border-r-2 border-sky-400/40" />
-        <div className="absolute bottom-0 left-0 h-6 w-6 border-b-2 border-l-2 border-sky-400/40" />
-        <div className="absolute right-0 bottom-0 h-6 w-6 border-r-2 border-b-2 border-sky-400/40" />
+        <div className="absolute top-12 left-0 h-5 w-5 border-t-2 border-l-2 border-sky-400/35" />
+        <div className="absolute top-12 right-0 h-5 w-5 border-t-2 border-r-2 border-sky-400/35" />
       </div>
 
       {/* Dedicated Empty Container for Three.js WebGL Canvas */}
@@ -619,9 +644,9 @@ export const WebARViewport: React.FC<WebARViewportProps> = ({
           aria-label="Optical flashcard scanner searching state"
           className="pointer-events-auto absolute inset-0 z-20 flex flex-col items-center justify-center bg-slate-950/75 p-6 text-center"
         >
-          <div className="relative flex h-56 w-56 flex-col items-center justify-center rounded-3xl border-2 border-dashed border-sky-400/70 bg-slate-900/90 p-6 shadow-2xl">
-            <ScanLine className="h-12 w-12 text-sky-400" aria-hidden="true" />
-            <p className="mt-3 font-display text-base font-semibold text-white">
+          <div className="relative flex h-52 w-52 flex-col items-center justify-center rounded-3xl border-2 border-dashed border-sky-400/70 bg-slate-900/90 p-5 shadow-2xl">
+            <ScanLine className="h-10 w-10 text-sky-400" aria-hidden="true" />
+            <p className="mt-2.5 font-display text-base font-semibold text-white">
               Searching for Fiducial Marker
             </p>
             <p className="mt-1 font-mono-tabular text-xs text-slate-400">
@@ -629,14 +654,14 @@ export const WebARViewport: React.FC<WebARViewportProps> = ({
             </p>
           </div>
 
-          <p className="mt-4 max-w-sm text-xs leading-relaxed text-slate-300">
+          <p className="mt-3 max-w-sm text-xs leading-relaxed text-slate-300">
             Align the physical <strong>{currentMarkerSpec.commonName}</strong> flashcard within the optical reticle or lock the marker below to anchor the 3D anatomical specimen.
           </p>
 
           <button
             type="button"
             onClick={onReacquireMarker}
-            className="mt-5 flex min-h-[44px] items-center gap-2 rounded-xl bg-sky-500 px-5 py-2.5 text-xs font-semibold text-slate-950 shadow-lg transition-colors hover:bg-sky-400 whitespace-nowrap"
+            className="mt-4 flex min-h-[44px] items-center gap-2 rounded-xl bg-sky-500 px-5 py-2.5 text-xs font-semibold text-slate-950 shadow-lg transition-colors hover:bg-sky-400 whitespace-nowrap"
           >
             <span>Lock Flashcard Marker ({currentMarkerSpec.markerCode})</span>
           </button>

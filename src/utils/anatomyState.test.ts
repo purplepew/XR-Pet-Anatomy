@@ -77,11 +77,11 @@ test('matchFiducialMatrix recognizes canine and feline flashcard fiducial patter
 });
 
 test('clampCalloutPosition keeps floating organ UI card within mobile and desktop viewports', () => {
-  const mobileClamp = clampCalloutPosition(380, 50, 390, 844, 300, 200);
+  const mobileClamp = clampCalloutPosition(380, 50, 390, 844, 300, 195);
   assert.ok(mobileClamp.cardX >= 12);
   assert.ok(mobileClamp.cardX + 300 <= 390 - 12);
-  assert.ok(mobileClamp.cardY >= 60);
-  assert.ok(mobileClamp.cardY + 200 <= 844 - 350);
+  assert.ok(mobileClamp.cardY >= 104);
+  assert.ok(mobileClamp.cardY + 195 <= 844 - 340);
 
   const desktopClamp = clampCalloutPosition(720, 480, 1440, 900, 340, 230);
   assert.ok(desktopClamp.cardY + 230 <= 900 - 320);

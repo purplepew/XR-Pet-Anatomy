@@ -239,9 +239,9 @@ export function clampCalloutPosition(
 ): { cardX: number; cardY: number; anchorX: number; anchorY: number } {
   const isMobile = viewportWidth < 640;
   const safeMarginX = isMobile ? 12 : 20;
-  const safeTop = isMobile ? 60 : 68;
-  // Reserve 320px at bottom on desktop and 350px on mobile for the bottom control dock
-  const bottomDockClearance = isMobile ? 350 : 320;
+  const safeTop = isMobile ? 104 : 72;
+  // Reserve 320px at bottom on desktop and 340px on mobile for the bottom control dock
+  const bottomDockClearance = isMobile ? 340 : 320;
   const safeBottom = Math.max(
     safeTop + cardHeight + 8,
     viewportHeight - bottomDockClearance
@@ -251,7 +251,7 @@ export function clampCalloutPosition(
   const anchorY = Math.max(0, Math.min(viewportHeight, projectedY));
 
   if (isMobile) {
-    // On mobile viewports, center the compact floating card cleanly near the top of the AR stage
+    // On mobile viewports, center the compact floating card cleanly below the top AR camera bar
     const cardX = Math.max(
       safeMarginX,
       Math.round((viewportWidth - cardWidth) * 0.5)

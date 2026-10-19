@@ -1,7 +1,10 @@
 {
   "name": "Animar — Veterinary WebAR Anatomy Explorer",
   "description": "Mobile-first WebAR application using optical flashcard marker tracking to project interactive multi-layered 3D canine and feline anatomy with touch raycasting.",
-  "requestFramePermissions": ["camera"],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "requestFramePermissions": [
+    "camera"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
 }
-
